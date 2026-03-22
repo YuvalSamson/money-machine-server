@@ -3,12 +3,13 @@ moneyMachine — Flask server (Render)
 Endpoints:
   POST /chat   — proxy to Claude with job context
   POST /bid    — submit bid via Freelancer API (or log approval)
-  POST /notify — called by n8n to push job to app (via Expo push)
+  POST /notify — called by n8n to push job to app (via FCM V1)
 """
 
 import os
 import json
 import requests
+import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -17,7 +18,87 @@ CORS(app)
 
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 FREELANCER_TOKEN = os.environ.get("FREELANCER_API_TOKEN", "")
-EXPO_PUSH_TOKEN = os.environ.get("EXPO_PUSH_TOKEN", "")  # Your device token
+FCM_SERVICE_ACCOUNT = os.environ.get("FCM_SERVICE_ACCOUNT", "")  # JSON string
+EXPO_PUSH_TOKEN = os.environ.get("EXPO_PUSH_TOKEN", "")
+FCM_TOKEN = os.environ.get("FCM_DEVICE_TOKEN", "")  # Native FCM token
+
+
+def get_fcm_access_token():
+    """Get OAuth2 access token from service account for FCM V1."""
+    try:
+        import google.auth.transport.requests
+        from google.oauth2 import service_account
+
+        service_account_info = json.loads(FCM_SERVICE_ACCOUNT)
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+        )
+        credentials.refresh(google.auth.transport.requests.Request())
+        return credentials.token
+    except Exception as e:
+        print(f"Error getting FCM access token: {e}")
+        return None
+
+
+def send_fcm_v1(data: dict):
+    """Send push notification via FCM V1 API."""
+    try:
+        service_account_info = json.loads(FCM_SERVICE_ACCOUNT)
+        project_id = service_account_info.get("project_id", "")
+        access_token = get_fcm_access_token()
+
+        if not access_token:
+            return {"error": "Could not get FCM access token"}
+
+        url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+
+        payload = {
+            "message": {
+                "token": FCM_TOKEN,
+                "notification": {
+                    "title": f"💰 New Job (Score {data.get('score', '?')}/10)",
+                    "body": data.get("title", "New freelance job available"),
+                },
+                "data": {k: str(v) for k, v in data.items()},
+                "android": {
+                    "priority": "high",
+                    "notification": {
+                        "sound": "default",
+                        "channel_id": "default"
+                    }
+                }
+            }
+        }
+
+        res = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            },
+            json=payload
+        )
+        return res.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def send_expo_push(data: dict):
+    """Send push notification via Expo Push API (fallback)."""
+    push_payload = {
+        "to": EXPO_PUSH_TOKEN,
+        "title": f"💰 New Job (Score {data.get('score', '?')}/10)",
+        "body": data.get("title", "New freelance job available"),
+        "data": data,
+        "sound": "default",
+    }
+    res = requests.post(
+        "https://exp.host/--/api/v2/push/send",
+        json=push_payload,
+        headers={"Content-Type": "application/json"},
+    )
+    return res.json()
 
 
 # ─── Chat proxy ───────────────────────────────────────────────────────────────
@@ -68,10 +149,6 @@ def bid():
     if action != "approve":
         return jsonify({"status": "rejected"})
 
-    # TODO: Extract project ID from link and call Freelancer API
-    # project_id = link.split("/")[-1].split("?")[0]
-    # freelancer_bid_response = submit_freelancer_bid(project_id)
-
     print(f"[BID APPROVED] {link}")
     return jsonify({"status": "approved", "link": link})
 
@@ -80,31 +157,17 @@ def bid():
 
 @app.route("/notify", methods=["POST"])
 def notify():
-    """
-    Called by n8n when a job scores >= 8.
-    Sends Expo push notification to your device.
-    Body: { title, link, score, reason, budget, timeline, description }
-    """
     data = request.json
 
-    if not EXPO_PUSH_TOKEN:
-        return jsonify({"error": "No Expo push token configured"}), 400
-
-    push_payload = {
-        "to": EXPO_PUSH_TOKEN,
-        "title": f"💰 New Job (Score {data.get('score', '?')}/10)",
-        "body": data.get("title", "New freelance job available"),
-        "data": data,  # Full job data passed to app
-        "sound": "default",
-    }
-
-    res = requests.post(
-        "https://exp.host/--/api/v2/push/send",
-        json=push_payload,
-        headers={"Content-Type": "application/json"},
-    )
-
-    return jsonify({"status": "sent", "expo_response": res.json()})
+    # Try FCM V1 first, fall back to Expo
+    if FCM_SERVICE_ACCOUNT and FCM_TOKEN:
+        result = send_fcm_v1(data)
+        return jsonify({"status": "sent", "method": "fcm_v1", "result": result})
+    elif EXPO_PUSH_TOKEN:
+        result = send_expo_push(data)
+        return jsonify({"status": "sent", "method": "expo", "result": result})
+    else:
+        return jsonify({"error": "No push credentials configured"}), 400
 
 
 # ─── Health check ─────────────────────────────────────────────────────────────
