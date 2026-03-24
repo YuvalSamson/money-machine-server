@@ -51,3 +51,11 @@ When Error Trigger fires, these fields are available in $json:
 - To update workflow settings (e.g. errorWorkflow): PATCH /workflows/{id} with settings object
 - errorWorkflow field goes inside "settings": { "errorWorkflow": "WORKFLOW_ID" }
 - Always verify workflow exists before linking it as error handler
+
+## Archived Workflows
+
+- The API returns archived workflows in list_workflows — even though they are hidden in the UI.
+- An archived workflow has "isArchived": true in its data.
+- PATCH on an archived workflow returns 405 Method Not Allowed.
+- When searching by name: always filter out archived ones (isArchived != true).
+- When update_workflow returns 405: call list_workflows again, filter isArchived=false, retry with correct ID.
