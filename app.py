@@ -371,7 +371,7 @@ def execute_agent_tool(tool_name, tool_input):
         return json.dumps({"error": str(e)})
 
 
-AGENT_SYSTEM_PROMPT = """You are n8n-agent, an autonomous AI assistant that manages n8n workflows.
+AGENT_SYSTEM_PROMPT_BASE = """You are n8n-agent, an autonomous AI assistant that manages n8n workflows.
 You receive tasks in natural language and execute them via the n8n API.
 
 Your capabilities:
@@ -386,14 +386,30 @@ Workflow:
 4. Verify the result
 5. Send a final Telegram report with what was done and the outcome
 
-Always send a Telegram report at the end — even on errors.
+Always send a final Telegram report — even on errors.
 Be concise and efficient.
 When creating workflows, build complete valid n8n JSON including all required node parameters.
 """
 
+KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "n8n_knowledge.md")
+
+def load_knowledge():
+    try:
+        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def build_system_prompt():
+    knowledge = load_knowledge()
+    if knowledge:
+        return AGENT_SYSTEM_PROMPT_BASE + "\n\n## Knowledge Base\n\n" + knowledge
+    return AGENT_SYSTEM_PROMPT_BASE
+
 def run_agent(task):
     messages = [{"role": "user", "content": task}]
     telegram_send(f"🤖 *n8n-agent* קיבל משימה:\n`{task}`")
+    system_prompt = build_system_prompt()
 
     for _ in range(20):
         response = requests.post(
@@ -406,7 +422,7 @@ def run_agent(task):
             json={
                 "model": "claude-opus-4-5",
                 "max_tokens": 4096,
-                "system": AGENT_SYSTEM_PROMPT,
+                "system": system_prompt,
                 "tools": AGENT_TOOLS,
                 "messages": messages,
             },
